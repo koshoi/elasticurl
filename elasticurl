@@ -1,0 +1,208 @@
+#!/bin/bash
+
+set -euo pipefail
+
+export SSDB_DATABASE=kube
+
+ELASTIC_ENDPOINT="localhost:9200"
+ELASTIC_AUTH="elastic:changeme"
+ELASTIC_INDEX="logstash"
+DEBUG=""
+RAW=""
+JQRECURSIVE=""
+
+FCNT=0
+FKEYS=()
+FVALUES=()
+
+# copy-pasted from https://stackoverflow.com/questions/49438164/parse-json-and-json-values-with-jq
+jqq='
+def recursively(f):
+	. as $in
+	| if type == "object" then
+			reduce keys[] as $key
+				( {}; . + { ($key):  ($in[$key]  | recursively(f) )} )
+	elif type == "array" then map( recursively(f) )
+	else try (f as $f | if $f == . then . else ($f | recursively(f)) end) catch $in
+	end;
+'
+
+function _log {
+	local level="$1"
+	local msg="$2"
+	printf "[%s] %s\n" "$level" "$msg" 1>&2
+}
+
+function debug {
+	if [ -n "$DEBUG" ]; then
+		_log 'debug' "$*"
+	fi
+}
+
+function error {
+	_log 'error' "$*"
+
+	exit 100
+}
+
+function print_help {
+	grep '^\s*# AUTODOC ' "$0" | sed -e "s/^\s*# AUTODOC //g"
+}
+
+function add_filter {
+	IFS='=' read -ra filter <<< "$1"
+	FCNT=$(( FCNT + 1 ))
+	FKEYS+=( "${filter[0]}" )
+	FVALUES+=( "${filter[1]}" )
+}
+
+function output {
+	query='.hits.hits[]._source|del(.message)|del(."@timestamp")|del(."@version")'
+	if [ -n "$JQRECURSIVE" ]; then
+		query=$(printf '%s%s|recursively(fromjson)' "$jqq" "$query")
+	fi
+	debug "jq query='$query'"
+	jq "$query"
+}
+
+function elasticRequest {
+	filters=()
+
+	for i in $(seq 0 $(( FCNT - 1 ))); do
+		f=$(printf '{"match":{"%s":"%s"}}' "${FKEYS[$i]}" "${FVALUES[$i]}")
+		filters+=("$f")
+	done
+
+	f=$(printf '%s,' "${filters[@]}")
+	# remove trailing coma
+	f="${f%,}"
+
+	body=$(printf '{"query":{"bool":{"filter":[%s]}}}' "$f")
+	debug "body='$body'"
+	echo "$body"
+}
+
+function elastiCURL {
+	curl -s -H 'Content-Type: application/json' -d "$(elasticRequest)" --user "$ELASTIC_AUTH" "$ELASTIC_ENDPOINT/$ELASTIC_INDEX/_search?pretty"
+}
+
+# AUTODOC elasticurl [OPTIONS]
+# AUTODOC 	retrieve logs from elasticsearch
+# AUTODOC 
+# AUTODOC configurable options are
+# AUTODOC 
+while [[ $# -gt 0 ]]; do
+	option="$1"
+
+	case $option in
+		# AUTODOC 	-a|--auth user:password
+		# AUTODOC 		specify credentials for elasticsearch (default='elastic:changeme')
+		# AUTODOC 
+		-a|--auth)
+			[ -z "${2:-}" ] && error "$option param can not be empty"
+			ELASTIC_AUTH="$2"
+			shift 2
+			;;
+
+		# AUTODOC 	-f|--filter key=value
+		# AUTODOC 		specify filter for output logs
+		# AUTODOC 
+		-f|--filter)
+			[ -z "${2:-}" ] && error "$option param can not be empty"
+			add_filter "$2"
+			shift 2
+			;;
+
+		# AUTODOC 	-i|--index 'index_name'
+		# AUTODOC 		specify elastic index (default='logstash')
+		# AUTODOC 
+		-i|--index)
+			[ -z "${2:-}" ] && error "$option param can not be empty"
+			ELASTIC_INDEX="$2"
+			shift 2
+			;;
+
+		# AUTODOC 	-n|--namespace 'k8s_namespace'
+		# AUTODOC 		specify namespace
+		# AUTODOC 		equivalent to -f namespace=k8s_namespace
+		# AUTODOC 
+		-n|--namespace)
+			[ -z "${2:-}" ] && error "$option param can not be empty"
+			add_filter "namespace=$2"
+			shift 2
+			;;
+
+		# AUTODOC 	-s|--service 'service_name'
+		# AUTODOC 		specify service
+		# AUTODOC 		equivalent to -f service=service_name
+		# AUTODOC 
+		-s|--service)
+			[ -z "${2:-}" ] && error "$option param can not be empty"
+			add_filter "service=$2"
+			shift 2
+			;;
+
+		# AUTODOC 	-e|--endpoint host
+		# AUTODOC 		specify elasticsearch endpoint (default='localhost:9200')
+		# AUTODOC 
+		-e|--endpoint)
+			[ -z "${2:-}" ] && error "$option param can not be empty"
+			ELASTIC_ENDPOINT="$2"
+			shift 2
+			;;
+
+		# AUTODOC 	-d|--debug
+		# AUTODOC 		enable debug output
+		# AUTODOC 
+		-d|--debug)
+			DEBUG=1
+			shift
+			;;
+
+		# AUTODOC 	-r|--raw
+		# AUTODOC 		raw elastic output
+		# AUTODOC 
+		-r|--raw)
+			RAW=1
+			shift
+			;;
+
+		# AUTODOC 	-R|--recursive-jq
+		# AUTODOC 		apply additional jq recursive JSON parsing
+		# AUTODOC 
+		-R|--recursive-jq)
+			JQRECURSIVE=1
+			shift
+			;;
+
+
+		# AUTODOC 	--help
+		# AUTODOC 		print help
+		# AUTODOC 
+		--help)
+			print_help
+			exit 0
+			;;
+
+		*)
+			print_help
+			error "unknown option='$option'"
+			break;;
+	esac
+done
+
+if [ "$FCNT" -gt 0 ]; then
+	for key in "${FKEYS[@]}"; do
+		debug "key=$key"
+	done
+
+	for value in "${FVALUES[@]}"; do
+		debug "value=$value"
+	done
+fi
+
+if [ -z "$RAW" ]; then
+	elastiCURL | output
+else
+	elastiCURL
+fi
