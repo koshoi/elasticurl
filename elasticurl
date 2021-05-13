@@ -10,12 +10,23 @@ ELASTIC_INDEX="logstash"
 DEBUG=""
 RAW=""
 JQRECURSIVE=""
+ORDER_BY="@timestamp"
+ORDER_DIRECTION="asc"
 
-FCNT=0
-FKEYS=()
-FVALUES=()
+EQFCNT=0
+EQFKEYS=()
+EQFVALUES=()
+
+LTFCNT=0
+LTFKEYS=()
+LTFVALUES=()
+
+GTFCNT=0
+GTFKEYS=()
+GTFVALUES=()
 
 # copy-pasted from https://stackoverflow.com/questions/49438164/parse-json-and-json-values-with-jq
+# shellcheck disable=SC2016
 jqq='
 def recursively(f):
 	. as $in
@@ -50,10 +61,29 @@ function print_help {
 }
 
 function add_filter {
-	IFS='=' read -ra filter <<< "$1"
-	FCNT=$(( FCNT + 1 ))
-	FKEYS+=( "${filter[0]}" )
-	FVALUES+=( "${filter[1]}" )
+	case "$1" in
+		eq)
+			EQFCNT=$(( EQFCNT + 1 ))
+			EQFKEYS+=( "$2" )
+			EQFVALUES+=( "$3" )
+			;;
+
+		lt)
+			LTFCNT=$(( LTFCNT + 1 ))
+			LTFKEYS+=( "$2" )
+			LTFVALUES+=( "$3" )
+			;;
+
+		gt)
+			GTFCNT=$(( GTFCNT + 1 ))
+			GTFKEYS+=( "$2" )
+			GTFVALUES+=( "$3" )
+			;;
+
+		*)
+			error "unknown filter='$1'"
+			;;
+	esac
 }
 
 function output {
@@ -65,11 +95,22 @@ function output {
 	jq "$query"
 }
 
+# {"sort":[{"@timestamp":{"order":"asc"}}],"query":{"bool":{"filter":[{"range":{"@timestamp":{"gte":"2021-05-12T12:00","lte":"2021-05-14"}}},{"match":{"status":"200"}}]}}}
 function elasticRequest {
 	filters=()
 
-	for i in $(seq 0 $(( FCNT - 1 ))); do
-		f=$(printf '{"match":{"%s":"%s"}}' "${FKEYS[$i]}" "${FVALUES[$i]}")
+	for i in $(seq 0 $(( EQFCNT - 1 ))); do
+		f=$(printf '{"match":{"%s":"%s"}}' "${EQFKEYS[$i]}" "${EQFVALUES[$i]}")
+		filters+=("$f")
+	done
+
+	for j in $(seq 0 $(( GTFCNT - 1 ))); do
+		f=$(printf '{"range":{"%s":{"gte":"%s"}}}' "${GTFKEYS[$j]}" "${GTFVALUES[$j]}")
+		filters+=("$f")
+	done
+
+	for k in $(seq 0 $(( LTFCNT - 1 ))); do
+		f=$(printf '{"range":{"%s":{"lte":"%s"}}}' "${LTFKEYS[$k]}" "${LTFVALUES[$k]}")
 		filters+=("$f")
 	done
 
@@ -77,12 +118,17 @@ function elasticRequest {
 	# remove trailing coma
 	f="${f%,}"
 
-	body=$(printf '{"query":{"bool":{"filter":[%s]}}}' "$f")
+	body=$(printf '{"sort":[{"%s":{"order":"%s"}}],"query":{"bool":{"filter":[%s]}}}' "$ORDER_BY" "$ORDER_DIRECTION" "$f")
 	debug "body='$body'"
 	echo "$body"
 }
 
 function elastiCURL {
+	if [ -n "$DEBUG" ]; then
+		echo "curl -s -H 'Content-Type: application/json' -d '$(elasticRequest)' --user \"$ELASTIC_AUTH\" \"$ELASTIC_ENDPOINT/$ELASTIC_INDEX/_search?pretty\""
+		exit 0
+	fi
+
 	curl -s -H 'Content-Type: application/json' -d "$(elasticRequest)" --user "$ELASTIC_AUTH" "$ELASTIC_ENDPOINT/$ELASTIC_INDEX/_search?pretty"
 }
 
@@ -104,13 +150,61 @@ while [[ $# -gt 0 ]]; do
 			shift 2
 			;;
 
-		# AUTODOC 	-f|--filter key=value
+		# AUTODOC 	-f|--filter|--eq key value
 		# AUTODOC 		specify filter for output logs
 		# AUTODOC 
-		-f|--filter)
+		-f|--filter|--eq)
 			[ -z "${2:-}" ] && error "$option param can not be empty"
-			add_filter "$2"
-			shift 2
+			[ -z "${3:-}" ] && error "$option second param can not be empty"
+			add_filter eq "$2" "$3"
+			shift 3
+			;;
+
+		# AUTODOC 	-l|--lt|--less key value
+		# AUTODOC 		specify filter for output logs
+		# AUTODOC 
+		-l|--lt|--less)
+			[ -z "${2:-}" ] && error "$option param can not be empty"
+			[ -z "${3:-}" ] && error "$option second param can not be empty"
+			add_filter lt "$2" "$3"
+			shift 3
+			;;
+
+		# AUTODOC 	-g|--gt|--greater key value
+		# AUTODOC 		specify filter for output logs
+		# AUTODOC 
+		-g|--gt|--greater)
+			[ -z "${2:-}" ] && error "$option param can not be empty"
+			[ -z "${3:-}" ] && error "$option second param can not be empty"
+			add_filter gt "$2" "$3"
+			shift 3
+			;;
+
+		# AUTODOC 	-o|--order-by key ?direction
+		# AUTODOC 		order by specified key (default='@timestamp') in optional specified direction (default='asc')
+		# AUTODOC 
+		-o|--order-by)
+			[ -z "${2:-}" ] && error "$option param can not be empty"
+			ORDER_BY="$2"
+			if [ -z "${3:-}" ]; then
+				shift 2
+			else
+				case "$3" in
+					desc|descending|DESC|DESCENDING)
+						ORDER_DIRECTION="desc"
+						shift 3
+						;;
+
+					asc|ascending|ASC|ASCENDING)
+						ORDER_DIRECTION="asc"
+						shift 3
+						;;
+
+					*)
+						shift 2
+						;;
+				esac
+			fi
 			;;
 
 		# AUTODOC 	-i|--index 'index_name'
@@ -128,7 +222,7 @@ while [[ $# -gt 0 ]]; do
 		# AUTODOC 
 		-n|--namespace)
 			[ -z "${2:-}" ] && error "$option param can not be empty"
-			add_filter "namespace=$2"
+			add_filter eq namespace "$2"
 			shift 2
 			;;
 
@@ -138,7 +232,7 @@ while [[ $# -gt 0 ]]; do
 		# AUTODOC 
 		-s|--service)
 			[ -z "${2:-}" ] && error "$option param can not be empty"
-			add_filter "service=$2"
+			add_filter eq service "$2"
 			shift 2
 			;;
 
@@ -191,18 +285,42 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-if [ "$FCNT" -gt 0 ]; then
-	for key in "${FKEYS[@]}"; do
+if [ "$EQFCNT" -gt 0 ]; then
+	for key in "${EQFKEYS[@]}"; do
 		debug "key=$key"
 	done
 
-	for value in "${FVALUES[@]}"; do
+	for value in "${EQFVALUES[@]}"; do
 		debug "value=$value"
 	done
 fi
 
+if [ "$LTFCNT" -gt 0 ]; then
+	for key in "${LTFKEYS[@]}"; do
+		debug "ltkey=$key"
+	done
+
+	for value in "${LTFVALUES[@]}"; do
+		debug "ltvalue=$value"
+	done
+fi
+
+if [ "$GTFCNT" -gt 0 ]; then
+	for key in "${GTFKEYS[@]}"; do
+		debug "gtkey=$key"
+	done
+
+	for value in "${GTFVALUES[@]}"; do
+		debug "gtvalue=$value"
+	done
+fi
+
 if [ -z "$RAW" ]; then
-	elastiCURL | output
+	if [ -z "$DEBUG" ]; then
+		elastiCURL | output
+	else
+		elastiCURL
+	fi
 else
 	elastiCURL
 fi
