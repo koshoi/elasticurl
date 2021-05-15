@@ -12,6 +12,10 @@ RAW=""
 JQRECURSIVE=""
 ORDER_BY="@timestamp"
 ORDER_DIRECTION="asc"
+TIME_FROM="-1h"
+TIME_TO="now"
+TS_FMT="%Y-%m-%dT%H:%M:%S"
+TS_FIELD="@timestamp"
 
 EQFCNT=0
 EQFKEYS=()
@@ -58,6 +62,39 @@ function error {
 
 function print_help {
 	grep '^\s*# AUTODOC ' "$0" | sed -e "s/^\s*# AUTODOC //g"
+}
+
+function parse_time {
+	t="$1"
+
+	if [ "$t" == 'now' ]; then
+		date "+${TS_FMT}"
+		return 0
+	fi
+
+	res=""
+	extra=""
+	if grep -qP '^[\-\+]\d+[YMDdhms]$' <<< "$t"; then
+		amount=$(grep -oP '^[\-\+]\d+' <<< "$t")
+		match=$(grep -oP '[YMDdhms]$' <<< "$t")
+		case "$match" in
+			Y)
+				extra="${amount}years";;
+			M)
+				extra="${amount}months";;
+			D|d)
+				extra="${amount}days";;
+			m)
+				extra="${amount}minutes";;
+			s)
+				extra="${amount}seconds";;
+		esac
+		res=$(date --date "$(date) $extra" "+${TS_FMT}")
+	else
+		res=$(date --date "$t" "+${TS_FMT}")
+	fi
+
+	echo "$res"
 }
 
 function add_filter {
@@ -207,6 +244,36 @@ while [[ $# -gt 0 ]]; do
 			fi
 			;;
 
+		# AUTODOC 	-t|--time FROM TO
+		# AUTODOC 		timeframe to seek for (default=[-1h now])
+		# AUTODOC 		use '-t - -' to disable time filtering
+		# AUTODOC 
+		-t|--time)
+			[ -z "${2:-}" ] && error "$option param can not be empty"
+			[ -z "${3:-}" ] && error "$option second param can not be empty"
+			TIME_FROM="$2"
+			TIME_TO="$3"
+			shift 3;
+			;;
+
+		# AUTODOC 	-T|--time-field field_name
+		# AUTODOC 		field to use for time filtering (default='@timestamp')
+		# AUTODOC 
+		-T|--time-field)
+			[ -z "${2:-}" ] && error "$option param can not be empty"
+			TS_FIELD="$2"
+			shift 2;
+			;;
+
+		# AUTODOC 	--time-format fmt
+		# AUTODOC 		field to use for time filtering (default='%Y-%m-%dT%H:%M:%S')
+		# AUTODOC 
+		--time-format)
+			[ -z "${2:-}" ] && error "$option param can not be empty"
+			TS_FMT="$2"
+			shift 2;
+			;;
+
 		# AUTODOC 	-i|--index 'index_name'
 		# AUTODOC 		specify elastic index (default='logstash')
 		# AUTODOC 
@@ -284,6 +351,14 @@ while [[ $# -gt 0 ]]; do
 			break;;
 	esac
 done
+
+if [ "$TIME_TO" != "-" ]; then
+	add_filter lt "$TS_FIELD" "$(parse_time "$TIME_TO")"
+fi
+
+if [ "$TIME_FROM" != "-" ]; then
+	add_filter gt "$TS_FIELD" "$(parse_time "$TIME_FROM")"
+fi
 
 if [ "$EQFCNT" -gt 0 ]; then
 	for key in "${EQFKEYS[@]}"; do

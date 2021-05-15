@@ -21,19 +21,38 @@ configurable options are
 	-a|--auth user:password
 		specify credentials for elasticsearch (default='elastic:changeme')
 
-	-f|--filter key=value
+	-f|--filter|--eq key value
 		specify filter for output logs
+
+	-l|--lt|--less key value
+		specify filter for output logs
+
+	-g|--gt|--greater key value
+		specify filter for output logs
+
+	-o|--order-by key ?direction
+		order by specified key (default='@timestamp') in optional specified direction (default='asc')
+
+	-t|--time FROM TO
+		timeframe to seek for (default=[-1h now])
+		use '-t - -' to disable time filtering
+
+	-T|--time-field field_name
+		field to use for time filtering (default='@timestamp')
+
+	--time-format fmt
+		field to use for time filtering (default='%Y-%m-%dT%H:%M:%S')
 
 	-i|--index 'index_name'
 		specify elastic index (default='logstash')
 
 	-n|--namespace 'k8s_namespace'
 		specify namespace
-		equivalent to -f namespace=k8s_namespace
+		equivalent to -f namespace k8s_namespace
 
 	-s|--service 'service_name'
 		specify service
-		equivalent to -f service=service_name
+		equivalent to -f service service_name
 
 	-e|--endpoint host
 		specify elasticsearch endpoint (default='localhost:9200')
@@ -64,9 +83,15 @@ Those binaries are required on your machine with elasticurl
 ## Examples
 
 ```bash
-$ elasticurl -f request_id=7769b903-6ad8-4ce8-abbe-8c6794d0d594
+$ elasticurl -f request_id 7769b903-6ad8-4ce8-abbe-8c6794d0d594
 
 $ elasticurl -f status=200 --namespace stage
 
 $ elasticurl -R -f level=error --index someElasticIndex
+
+$ elasticurl -f level=error -t -2h now
+
+$ elasticurl --gt status 500 -t -1d/now
+
+$ elasticurl -t -5m/now -T ts --time-format %s
 ```
